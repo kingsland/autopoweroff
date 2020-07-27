@@ -1,0 +1,497 @@
+#!/bin/bash
+#VARs
+GUI_USER=`users | awk '{print $1}'`
+EXEC_USR=`whoami`
+EMPTY_ENV=1
+CRASH_ENV=0
+FIRST_RUN=1
+SELF=`readlink -f $0`
+RUN_TYPE=
+PRIVILEGE=
+
+#DIRs
+WORK_DIR=.autopoweroff
+HOME_DIR=/home/"$GUI_USER"
+if [ "$GUI_USER" = "root" ];then
+    HOME_DIR=/root/
+fi
+WORK_PATH=$HOME_DIR/$WORK_DIR
+CONF_PATH=$WORK_PATH/conf
+LOG_PATH=$WORK_PATH/logs
+SESSION_PATH=$WORK_PATH/sessions
+BIN_PATH=$WORK_PATH/bin
+
+#FILEs
+CONF_FILE=$CONF_PATH/poweroff.conf
+BIN_FILE=$BIN_PATH/autopoweroff
+SESSION_FILE=
+LOG_FILE=
+
+#FUNCs
+is_digit() {
+    if grep '^[[:digit:]]*$' <<< $1;then
+        return 1
+    else
+        return 0
+    fi
+}
+
+function_env_check() {
+    if [ ! -d $WORK_PATH ];then
+        return 1
+    fi
+    return 0
+}
+
+function_create_env() {
+    mkdir -p $WORK_PATH
+    mkdir -p $CONF_PATH
+    mkdir -p $SESSION_PATH
+    mkdir -p $BIN_PATH
+    mkdir -p $LOG_PATH
+    touch $CONF_FILE
+    chown $GUI_USER:$GUI_USER -R $WORK_PATH
+}
+
+function_conf_get() {
+    key=$1
+    file=$2
+    if [ -f $CONF_FILE ];then
+        value=`awk -F'=' '/^'$key'=/{print $2}' $file`
+    else
+        value=""
+    fi
+    echo $value
+}
+
+function_conf_set() {
+    key=$1
+    value=$2
+    file=$3
+    sed -i -e '/^'${key}'=/d'  $file
+    echo $key=$value >> $file
+}
+
+function_func_selection(){
+    zenity --list \
+    --radiolist \
+    --title="选择" \
+    --text="" \
+    --column='选  择' --column='id' --column='使用的方式' --hide-column=2 \
+    TRUE 'reboot' '重启' FALSE 'poweroff' '关机'  FALSE 'export' '导出日志'\
+    --width=280  --height=300
+}
+
+function_cancel() {
+    zenity --error --text="用户取消操作！"
+    exit
+}
+
+function_not_support() {
+    zenity --error --text=" 工具不支持该系统！"
+    exit
+}
+
+function_time_selection(){
+    TIME_TMP=$(zenity --list \
+    --radiolist \
+    --title="选择" \
+    --text="选择时间设定：" \
+    --column='选  择' --column='设定时间' --column='tag' --print-column=3 \
+    TRUE '15s' '15' FALSE '30s' '30' FALSE '自定义' 'else'\
+    --width=280  --height=300 --hide-column=3)
+    if [ "$TIME_TMP" == "else" ];then
+        TIME_TMP=$(zenity --entry --title="自定义时间" --text="时间以s为单位" --entry-text="请输入时间(s)")
+    fi
+    echo $TIME_TMP
+}
+
+function_su_check() {
+    sh -c "sleep 0.5; echo $PASSWD" | script -qc "su - $USER; su -c 'echo OK'" | tail -n 1
+}
+
+function_switch_to_root() {
+    if [ "$EXEC_USR" != "root" ];then
+        sudo_check=`groups $GUI_USER | grep sudo | wc -l`
+        if [ "$sudo_check" == "0" ];then
+            zenity --error --text="用户无sudo权限，切换到root用户执行。"
+            exit
+        fi
+        sudo_password=`zenity --password --title="输入sudo密码以运行程序"`
+        if [ ! -n "$sudo_password" ];then
+            function_cancel
+        fi
+        sudo -k
+        echo "$sudo_password" | sudo -S bash -c "exit" >/dev/null 2>&1
+        check=$?
+        if [ "$check" != "0" ];then
+            zenity --error --text="密码错误!"
+            exit
+        else
+            export AUTOPOWEROFF_SUDO_PASSWORD=$sudo_password
+            echo "$sudo_password" | sudo -E -S bash -c "$SELF"
+        fi
+        exit
+    else
+        #root
+        #FIXME
+        if [ ! -n "$AUTOPOWEROFF_SUDO_PASSWORD" ];then
+            sudo_check=`groups $GUI_USER | grep sudo | wc -l`
+            if [ "$sudo_check" == "0" ];then
+                #no sudo privilege
+                password=`zenity --password --title="输入root密码以运行程序"`
+                if [ ! -n "$password" ];then
+                    function_cancel
+                fi
+                echo "$password" | su -c "exit" >/dev/null 2>&1
+                check=$?
+                if [ "$check" != "0" ];then
+                    zenity --error --text="密码错误!"
+                    exit
+                else
+                    PRIVILEGE=su
+                fi
+
+            else
+                password=`zenity --password --title="输入sudo密码以运行程序"`
+                if [ ! -n "$password" ];then
+                    function_cancel
+                fi
+                sudo -k
+                echo "$password" | sudo -S bash -c "exit" >/dev/null 2>&1
+                check=$?
+                if [ "$check" != "0" ];then
+                    zenity --error --text="密码错误!"
+                    exit
+                else
+                    #set sudopassword
+                    PRIVILEGE=sudo
+                fi
+            fi
+        else
+            password=$AUTOPOWEROFF_SUDO_PASSWORD
+            PRIVILEGE=sudo
+        fi
+        function_conf_set "PRIVILEGE" $PRIVILEGE $CONF_FILE
+        function_conf_set "PASSWORD" $password $CONF_FILE
+    fi
+    function_conf_get "PRIVILEGE" $CONF_FILE
+    function_conf_get "PASSWORD" $CONF_FILE
+}
+
+function_stop_run() {
+    function_conf_set "RUNNING_STAT" "STOP" $CONF_FILE
+    function_restore_login
+    function_cancel_autostart
+    exit
+}
+
+function_show_count_down() {
+    COUNT_DOWN=$1
+    TOTAL_COUNT=$2
+    {
+        while [ "$COUNT_DOWN" != "0" ];
+        do
+            echo "#$RUN_TYPE in $COUNT_DOWN seconds"
+            let COUNT_DOWN=$COUNT_DOWN-1
+            sleep 1
+        done
+    }|zenity --progress --title="第${TOTAL_COUNT}次执行"  --pulsate --cancel-label="取消执行" --ok-label="请等待" --auto-close
+    if [ "$?" == "1" ];then
+        function_stop_run
+    fi
+}
+
+function_gen_uuid() {
+    cat /proc/sys/kernel/random/uuid
+}
+
+function_is_lightdm() {
+    LIGHTDM_RUNNING=`ps aux | grep lightdm | wc -l`
+    if [ "$LIGHTDM_RUNNING" -lt "1" ];then
+        return 1
+    else
+        return 0
+    fi
+}
+
+function_is_gdm3() {
+    GDM_RUNNING=`ps aux | grep gdm3 | wc -l`
+    if [ "$GDM_RUNNING" -lt "1" ];then
+        return 1
+    else
+        return 0
+    fi
+}
+
+DISPLAY_MANAGER_FILE=/etc/X11/default-display-manager
+function_desktop_env() {
+    if [ -f $DISPLAY_MANAGER_FILE ];then
+        basename $(cat ${DISPLAY_MANAGER_FILE})
+        return 0
+    fi
+    if [ function_is_lightdm ];then
+        echo "lightdm"
+        return 0
+    fi
+    if [ function_is_gdm3 ];then
+        echo "gdm3"
+        return 0
+    fi
+    echo "unknow desktop"
+}
+
+LIGHTDM_CONF_FILE="/etc/lightdm/lightdm.conf.d/removelogin.conf"
+LIGHTDM_CONF_PATH="/etc/lightdm/lightdm.conf.d/"
+function_remove_lightdm_login() {
+    if [ ! -d $LIGHTDM_CONF_PATH ];then
+        mkdir -p $LIGHTDM_CONF_PATH
+    fi
+    touch $LIGHTDM_CONF_FILE
+    chown $GUI_USER:$GUI_USER $LIGHTDM_CONF_FILE
+    echo "[SeatDefaults]" >$LIGHTDM_CONF_FILE
+    echo "autologin-user="$GUI_USER >>$LIGHTDM_CONF_FILE
+}
+
+GDM3_CONF_FILE="/etc/gdm3/custom.conf"
+function_remove_gdm3_login() {
+    SESSION_ID=$(function_conf_get "SESSION_NAME" $CONF_FILE)
+    GDM3_CONF_FILE_BACKUP=$CONF_PATH/${SESSION_ID}_custom.conf
+    if [ -f $GDM3_CONF_FILE ];then
+        function_conf_set "DESKTOP_ENV_CONF_BKUP" $GDM3_CONF_FILE_BACKUP $CONF_FILE 
+        chown $GUI_USER:$GUI_USER $GDM3_CONF_FILE
+        cp $GDM3_CONF_FILE $GDM3_CONF_FILE_BACKUP
+        chown $GUI_USER:$GUI_USER $GDM3_CONF_FILE_BACKUP
+        echo "[daemon]" > $GDM3_CONF_FILE
+        echo "AutomaticLoginEnable=True" >> $GDM3_CONF_FILE
+        echo "AutomaticLogin="$GUI_USER >> $GDM3_CONF_FILE
+    else
+        function_conf_set "DESKTOP_ENV_CONF_BKUP" "NULL" $CONF_FILE 
+        touch $GDM3_CONF_FILE
+        chown $GUI_USER:$GUI_USER $GDM3_CONF_FILE
+        echo "[daemon]" > $GDM3_CONF_FILE
+        echo "AutomaticLoginEnable=True" >> $GDM3_CONF_FILE
+        echo "AutomaticLogin="$GUI_USER >> $GDM3_CONF_FILE
+    fi
+}
+
+function_remove_login() {
+    case $DESKTOP_ENV in
+    "lightdm")
+        function_remove_lightdm_login
+    ;;
+    "gdm3")
+        function_remove_gdm3_login
+    ;;
+    *)
+        function_not_support
+    ;;
+    esac
+}
+
+function_restore_lightdm_login() {
+    rm $LIGHTDM_CONF_FILE
+}
+
+function_restore_gdm3_login() {
+    GDM3_CONF_FILE_BACKUP=$(function_conf_get "DESKTOP_ENV_CONF_BKUP" $CONF_FILE)
+    if [ "$GDM3_CONF_FILE_BACKUP" == "NULL" ];then
+        rm $GDM3_CONF_FILE
+    else
+        cp $GDM3_CONF_FILE_BACKUP $GDM3_CONF_FILE
+        rm $GDM3_CONF_FILE_BACKUP
+    fi
+}
+
+function_restore_login() {
+    case $DESKTOP_ENV in
+    "lightdm")
+        function_restore_lightdm_login
+    ;;
+    "gdm3")
+        function_restore_gdm3_login
+    ;;
+    *)
+        function_not_support
+    ;;
+    esac
+}
+
+AUTOSTART_PATH=$HOME_DIR/.config/autostart
+AUTOSTART_CONF=$AUTOSTART_PATH/poweroff.desktop
+function_lightdm_autostart() {
+    mkdir -p $AUTOSTART_PATH
+    echo "[Desktop Entry]" >$AUTOSTART_CONF
+    echo "Type=Application" >>$AUTOSTART_CONF
+    echo "Exec="$BIN_FILE >>$AUTOSTART_CONF
+    echo "Hidden=false" >>$AUTOSTART_CONF
+    echo "Name[zh_CN]=autopoweroff" >>$AUTOSTART_CONF
+    echo "Name=autopoweroff" >>$AUTOSTART_CONF
+    chown -R  $GUI_USER:$GUI_USER $AUTOSTART_PATH
+}
+
+function_lightdm_cancel_autostart() {
+    rm -f $AUTOSTART_CONF
+}
+
+function_gdm3_autostart() {
+    function_lightdm_autostart
+}
+
+function_gdm3_cancel_autostart() {
+    function_lightdm_cancel_autostart
+}
+
+function_autostart() {
+    case $DESKTOP_ENV in
+    "lightdm")
+        function_lightdm_autostart
+    ;;
+    "gdm3")
+        function_gdm3_autostart
+    ;;
+    *)
+        function_not_support
+    ;;
+    esac
+
+}
+
+function_cancel_autostart() {
+    case $DESKTOP_ENV in
+    "lightdm")
+        function_lightdm_cancel_autostart
+    ;;
+    "gdm3")
+        function_gdm3_cancel_autostart
+    ;;
+    *)
+        function_not_support
+    ;;
+    esac
+
+}
+
+function_copy_myself() {
+    cp $SELF $BIN_FILE
+    chown $GUI_USER:$GUI_USER $BIN_FILE
+}
+
+function_create_session() {
+    SESSION_ID=`function_conf_get "SESSION_NAME" $CONF_FILE`
+    SESSION_FILE=$SESSION_PATH/$SESSION_ID
+    touch $SESSION_FILE
+    chown $GUI_USER:$GUI_USER $SESSION_FILE
+}
+
+function_conf_write_down() {
+    SESSION_UUID=`function_gen_uuid`
+    DATE_STR=`date +%Y%m%d%H%M%S`
+    function_conf_set "RUNNING_STAT" "RUNNING" $CONF_FILE
+    function_conf_set "SESSION_NAME" "${DATE_STR}_${SESSION_UUID}" $CONF_FILE
+    function_remove_login
+    function_copy_myself
+    function_autostart
+}
+
+function_init_session() {
+    _RUN_TYPE=$1
+    _RUN_TIME=$2
+    function_create_session
+    function_conf_set "RUN_TYPE" $_RUN_TYPE $SESSION_FILE
+    function_conf_set "RUN_TIME" $_RUN_TIME $SESSION_FILE
+    function_conf_set "TOTAL_COUNT" "0" $SESSION_FILE
+}
+
+function_init_logfile() {
+    SESSION_ID=`function_conf_get "SESSION_NAME" $CONF_FILE`
+    LOG_FILE=$LOG_PATH/$SESSION_ID.log
+    touch $LOG_FILE
+    chown $GUI_USER:$GUI_USER $LOG_FILE
+}
+
+function_log_down() {
+    echo "logdown"
+}
+
+function_do_take_action() {
+    ACTION=$1
+    case $ACTION in
+    "reboot")
+        #reboot
+        echo "reboot"
+    ;;
+    "poweroff")
+        #poweroff
+        echo "poweroff"
+    ;;
+    *)
+        zenity --error --text="未知操作 $ACTION"
+    ;;
+    esac
+}
+
+function_take_action() {
+    SESSION_ID=`function_conf_get "SESSION_NAME" $CONF_FILE`
+    SESSION_FILE=$SESSION_PATH/$SESSION_ID
+    RUN_TYPE=`function_conf_get RUN_TYPE $SESSION_FILE`
+    RUN_TIME=`function_conf_get RUN_TIME $SESSION_FILE`
+    TOTAL_COUNT=`function_conf_get TOTAL_COUNT $SESSION_FILE`
+    TOTAL_COUNT=`expr $TOTAL_COUNT + 1`
+    function_show_count_down $RUN_TIME $TOTAL_COUNT
+    function_conf_set "TOTAL_COUNT" $TOTAL_COUNT $SESSION_FILE
+    function_log_down
+    function_do_take_action $RUN_TYPE
+}
+
+function_first_run() {
+    #BE CAREFUL WHEN ADD MORE ACTION BEFORE THIS
+    if [ $EMPTY_ENV ];then
+        function_create_env
+    fi
+    function_switch_to_root
+    RUN_TYPE=`function_func_selection`
+    case $RUN_TYPE in
+        "poweroff"|"reboot")
+            RUN_TIME=`function_time_selection`
+            if [ ! $(is_digit $RUN_TIME) ] || [ "$RUN_TIME" -lt "1" ];then
+                zenity --error --text="输入时间错误！"
+                exit
+            fi
+            function_conf_write_down
+            function_init_session $RUN_TYPE $RUN_TIME
+            function_init_logfile
+            function_take_action
+        ;;
+        "export")
+            echo "export"
+        ;;
+        *)
+            function_cancel
+        ;;
+    esac
+}
+
+###############################Start##################################
+export LANGUAGE=en_US
+export LANG=en_US.UTF-8
+function_env_check
+EMPTY_ENV=$?
+
+if [ $EMPTY_ENV == 1 ];then
+    FIRST_RUN=1
+else
+    running_stat=`function_conf_get "RUNNING_STAT" $CONF_FILE`
+    if [ "$running_stat" == "RUNNING" ];then
+        FIRST_RUN=0
+    else
+        FIRST_RUN=1
+    fi
+fi
+DESKTOP_ENV=`function_desktop_env`
+if [ "$FIRST_RUN" == "1" ];then
+    function_first_run
+else
+    function_take_action
+fi
+#####finish no more############
