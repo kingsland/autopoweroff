@@ -78,7 +78,7 @@ function_func_selection(){
     --title="选择" \
     --text="" \
     --column='选  择' --column='id' --column='使用的方式' --hide-column=2 \
-    TRUE 'reboot' '重启' FALSE 'poweroff' '关机'  FALSE 'export' '导出日志'\
+    TRUE 'reboot' '重启' FALSE 'poweroff' '关机'  FALSE 'export' '导出历史日志'\
     --width=280  --height=300
 }
 
@@ -110,10 +110,56 @@ function_su_check() {
     sh -c "sleep 0.5; echo $PASSWD" | script -qc "su - $USER; su -c 'echo OK'" | tail -n 1
 }
 
+SUDOFILE=/etc/sudoers
+function_remove_sudo_password() {
+    #must root
+    echo "$GUI_USER ALL=(ALL:ALL) NOPASSWD:ALL #autopoweroff_commit" >>$SUDOFILE
+}
+
+function_restore_sudo_password() {
+    #admin user
+    sudo sed -i '/autopoweroff_commit/d' /etc/sudoers
+}
+
+function_restore_sudo() {
+    usr=$1
+    PRIVILEGE=$(function_conf_get "PRIVILEGE" $CONF_FILE)
+    if [ "$PRIVILEGE" == "su" ];then
+        gpasswd -d $usr sudo
+    fi
+}
+
+function_add_sudo() {
+    usr=$1
+    PRIVILEGE=$(function_conf_get "PRIVILEGE" $CONF_FILE)
+    if [ "$PRIVILEGE" == "su" ];then
+        gpasswd -a $usr sudo
+    fi
+}
+
+function_check_sudo_priv() {
+    #sudo_check=`groups $GUI_USER | grep sudo | wc -l`
+    #do not use groups to check the privilege, you won't
+    #know it, if you just add the user to one group without logout.
+    check_user=$1
+    users=`cat /etc/group | grep "^sudo\:" | cut -d ":" -f 4`
+    OLDIFS=$IFS
+    IFS=","
+    user_array=($users)
+    for user in ${user_array[@]}
+    do
+        if [ "$check_user" == "$user" ];then
+            return 0
+        fi
+    done
+    return 1
+}
+
 function_switch_to_root() {
     if [ "$EXEC_USR" != "root" ];then
-        sudo_check=`groups $GUI_USER | grep sudo | wc -l`
-        if [ "$sudo_check" == "0" ];then
+        function_check_sudo_priv $GUI_USER
+        sudo_check=$?
+        if [ "$sudo_check" == "1" ];then
             zenity --error --text="用户无sudo权限，切换到root用户执行。"
             exit
         fi
@@ -134,55 +180,30 @@ function_switch_to_root() {
         exit
     else
         #root
-        #FIXME
         if [ ! -n "$AUTOPOWEROFF_SUDO_PASSWORD" ];then
-            sudo_check=`groups $GUI_USER | grep sudo | wc -l`
-            if [ "$sudo_check" == "0" ];then
+            function_check_sudo_priv $GUI_USER
+            sudo_check=$?
+            if [ "$sudo_check" == "1" ];then
                 #no sudo privilege
-                password=`zenity --password --title="输入root密码以运行程序"`
-                if [ ! -n "$password" ];then
-                    function_cancel
-                fi
-                echo "$password" | su -c "exit" >/dev/null 2>&1
-                check=$?
-                if [ "$check" != "0" ];then
-                    zenity --error --text="密码错误!"
-                    exit
-                else
-                    PRIVILEGE=su
-                fi
-
+                PRIVILEGE=su
             else
-                password=`zenity --password --title="输入sudo密码以运行程序"`
-                if [ ! -n "$password" ];then
-                    function_cancel
-                fi
-                sudo -k
-                echo "$password" | sudo -S bash -c "exit" >/dev/null 2>&1
-                check=$?
-                if [ "$check" != "0" ];then
-                    zenity --error --text="密码错误!"
-                    exit
-                else
-                    #set sudopassword
-                    PRIVILEGE=sudo
-                fi
+                #set sudopassword
+                PRIVILEGE=sudo
             fi
         else
-            password=$AUTOPOWEROFF_SUDO_PASSWORD
             PRIVILEGE=sudo
         fi
         function_conf_set "PRIVILEGE" $PRIVILEGE $CONF_FILE
-        function_conf_set "PASSWORD" $password $CONF_FILE
     fi
-    function_conf_get "PRIVILEGE" $CONF_FILE
-    function_conf_get "PASSWORD" $CONF_FILE
 }
 
 function_stop_run() {
     function_conf_set "RUNNING_STAT" "STOP" $CONF_FILE
     function_restore_login
+    function_restore_sudo $GUI_USER
+    function_restore_sudo_password
     function_cancel_autostart
+    function_export_to_directory
     exit
 }
 
@@ -196,7 +217,7 @@ function_show_count_down() {
             let COUNT_DOWN=$COUNT_DOWN-1
             sleep 1
         done
-    }|zenity --progress --title="第${TOTAL_COUNT}次执行"  --pulsate --cancel-label="取消执行" --ok-label="请等待" --auto-close
+    }|zenity --progress --title="第${TOTAL_COUNT}次执行"  --pulsate --cancel-label="停止执行并导出日志" --ok-label="请等待" --auto-close
     if [ "$?" == "1" ];then
         function_stop_run
     fi
@@ -248,7 +269,7 @@ function_remove_lightdm_login() {
         mkdir -p $LIGHTDM_CONF_PATH
     fi
     touch $LIGHTDM_CONF_FILE
-    chown $GUI_USER:$GUI_USER $LIGHTDM_CONF_FILE
+    chown root:root $LIGHTDM_CONF_FILE
     echo "[SeatDefaults]" >$LIGHTDM_CONF_FILE
     echo "autologin-user="$GUI_USER >>$LIGHTDM_CONF_FILE
 }
@@ -268,7 +289,7 @@ function_remove_gdm3_login() {
     else
         function_conf_set "DESKTOP_ENV_CONF_BKUP" "NULL" $CONF_FILE 
         touch $GDM3_CONF_FILE
-        chown $GUI_USER:$GUI_USER $GDM3_CONF_FILE
+        chown root:root $GDM3_CONF_FILE
         echo "[daemon]" > $GDM3_CONF_FILE
         echo "AutomaticLoginEnable=True" >> $GDM3_CONF_FILE
         echo "AutomaticLogin="$GUI_USER >> $GDM3_CONF_FILE
@@ -290,16 +311,15 @@ function_remove_login() {
 }
 
 function_restore_lightdm_login() {
-    rm $LIGHTDM_CONF_FILE
+    sudo rm $LIGHTDM_CONF_FILE
 }
 
 function_restore_gdm3_login() {
     GDM3_CONF_FILE_BACKUP=$(function_conf_get "DESKTOP_ENV_CONF_BKUP" $CONF_FILE)
     if [ "$GDM3_CONF_FILE_BACKUP" == "NULL" ];then
-        rm $GDM3_CONF_FILE
+        sudo rm $GDM3_CONF_FILE
     else
-        cp $GDM3_CONF_FILE_BACKUP $GDM3_CONF_FILE
-        rm $GDM3_CONF_FILE_BACKUP
+        sudo mv $GDM3_CONF_FILE_BACKUP $GDM3_CONF_FILE
     fi
 }
 
@@ -406,24 +426,25 @@ function_init_session() {
 function_init_logfile() {
     SESSION_ID=`function_conf_get "SESSION_NAME" $CONF_FILE`
     LOG_FILE=$LOG_PATH/$SESSION_ID.log
+    function_conf_set "LOG_FILE" $LOG_FILE $CONF_FILE
     touch $LOG_FILE
     chown $GUI_USER:$GUI_USER $LOG_FILE
 }
 
 function_log_down() {
-    echo "logdown"
+    LOG_FILE=`function_conf_get "LOG_FILE" $CONF_FILE`
+    sudo date >> $LOG_FILE
+    sudo lspci -vvv >> $LOG_FILE
 }
 
 function_do_take_action() {
     ACTION=$1
     case $ACTION in
     "reboot")
-        #reboot
-        echo "reboot"
+        reboot
     ;;
     "poweroff")
-        #poweroff
-        echo "poweroff"
+        poweroff
     ;;
     *)
         zenity --error --text="未知操作 $ACTION"
@@ -438,17 +459,43 @@ function_take_action() {
     RUN_TIME=`function_conf_get RUN_TIME $SESSION_FILE`
     TOTAL_COUNT=`function_conf_get TOTAL_COUNT $SESSION_FILE`
     TOTAL_COUNT=`expr $TOTAL_COUNT + 1`
-    function_show_count_down $RUN_TIME $TOTAL_COUNT
     function_conf_set "TOTAL_COUNT" $TOTAL_COUNT $SESSION_FILE
+    function_add_sudo $GUI_USER
+    function_remove_sudo_password
     function_log_down
+    function_show_count_down $RUN_TIME $TOTAL_COUNT
     function_do_take_action $RUN_TYPE
 }
 
+function_export_to_directory() {
+    LOG_FILE=`function_conf_get "LOG_FILE" $CONF_FILE`
+    directory=`zenity --file-selection --title="导出日志到目录..." --directory`
+    if [ "$?" == "0" ];then
+        cp -a $LOG_FILE $directory
+    else
+        function_cancel
+    fi
+}
+
+function_export_files_to_directory() {
+    files=`zenity --file-selection --title="选择日志" --multiple --separator=" " --filename="$LOG_PATH/"`
+    if [ "$?" ==  "0" ];then
+        directory=`zenity --file-selection --title="导出日志到目录..." --directory`
+        if [ "$?" == "0" ];then
+            cp -a $files $directory
+        else
+            function_cancel
+        fi
+    else
+        function_cancel
+    fi
+}
+
 function_first_run() {
-    #BE CAREFUL WHEN ADD MORE ACTION BEFORE THIS
     if [ $EMPTY_ENV ];then
         function_create_env
     fi
+    #BE CAREFUL WHEN ADD MORE ACTION BEFORE THIS
     function_switch_to_root
     RUN_TYPE=`function_func_selection`
     case $RUN_TYPE in
@@ -464,7 +511,7 @@ function_first_run() {
             function_take_action
         ;;
         "export")
-            echo "export"
+            function_export_files_to_directory
         ;;
         *)
             function_cancel
@@ -473,8 +520,6 @@ function_first_run() {
 }
 
 ###############################Start##################################
-export LANGUAGE=en_US
-export LANG=en_US.UTF-8
 function_env_check
 EMPTY_ENV=$?
 
@@ -494,4 +539,4 @@ if [ "$FIRST_RUN" == "1" ];then
 else
     function_take_action
 fi
-#####finish no more############
+#######finish no more############
