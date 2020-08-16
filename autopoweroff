@@ -157,12 +157,6 @@ function_check_sudo_priv() {
 
 function_switch_to_root() {
     if [ "$EXEC_USR" != "root" ];then
-        function_check_sudo_priv $GUI_USER
-        sudo_check=$?
-        if [ "$sudo_check" == "1" ];then
-            zenity --error --text="用户无sudo权限，切换到root用户执行。"
-            exit
-        fi
         sudo_password=`zenity --password --title="输入sudo密码以运行程序"`
         if [ ! -n "$sudo_password" ];then
             function_cancel
@@ -171,36 +165,19 @@ function_switch_to_root() {
         echo "$sudo_password" | sudo -S bash -c "exit" >/dev/null 2>&1
         check=$?
         if [ "$check" != "0" ];then
-            zenity --error --text="密码错误!"
+            zenity --error --text="无法提升权限，可能由以下原因造成。\n1、密码错误，请重新输入密码。\n2、用户无sudo权限，通过su切换到root运行脚本!"
             exit
         else
-            export AUTOPOWEROFF_SUDO_PASSWORD=$sudo_password
             echo "$sudo_password" | sudo -E -S bash -c "$SELF"
         fi
         exit
-    else
-        #root
-        if [ ! -n "$AUTOPOWEROFF_SUDO_PASSWORD" ];then
-            function_check_sudo_priv $GUI_USER
-            sudo_check=$?
-            if [ "$sudo_check" == "1" ];then
-                #no sudo privilege
-                PRIVILEGE=su
-            else
-                #set sudopassword
-                PRIVILEGE=sudo
-            fi
-        else
-            PRIVILEGE=sudo
-        fi
-        function_conf_set "PRIVILEGE" $PRIVILEGE $CONF_FILE
     fi
 }
 
 function_stop_run() {
     function_conf_set "RUNNING_STAT" "STOP" $CONF_FILE
     function_restore_login
-    function_restore_sudo $GUI_USER
+    #function_restore_sudo $GUI_USER
     function_restore_sudo_password
     function_cancel_autostart
     function_export_to_directory
@@ -433,8 +410,15 @@ function_init_logfile() {
 
 function_log_down() {
     LOG_FILE=`function_conf_get "LOG_FILE" $CONF_FILE`
-    sudo date >> $LOG_FILE
-    sudo lspci -vvv >> $LOG_FILE
+    chelsio_num=`lspci | grep Chelsio | wc -l`
+    pci_num=`lspci | wc -l`
+    ETH_82574=`lspci | grep 82574L | wc -l`
+    I350=`lspci | grep I350 | wc -l`
+    IDT=`lspci | grep IDT | wc -l`
+    VGA=`lspci | grep VGA | wc -l`
+    str="pcisum=$pci_num chelsio=$chelsio_num IDT=$IDR 82574=$ETH_82574 I350=$I350 VGA=$VGA"
+    DATE=`date "+%Y%m%d-%H%M"`
+    echo $DATE $str >> $LOG_FILE
 }
 
 function_do_take_action() {
@@ -460,7 +444,6 @@ function_take_action() {
     TOTAL_COUNT=`function_conf_get TOTAL_COUNT $SESSION_FILE`
     TOTAL_COUNT=`expr $TOTAL_COUNT + 1`
     function_conf_set "TOTAL_COUNT" $TOTAL_COUNT $SESSION_FILE
-    function_add_sudo $GUI_USER
     function_remove_sudo_password
     function_log_down
     function_show_count_down $RUN_TIME $TOTAL_COUNT
