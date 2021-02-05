@@ -372,6 +372,7 @@ function_cancel_autostart() {
 function_copy_myself() {
     cp $SELF $BIN_FILE
     chown $GUI_USER:$GUI_USER $BIN_FILE
+    chmod 755 $BIN_FILE
 }
 
 function_create_session() {
@@ -416,7 +417,8 @@ function_log_down() {
     I350=`lspci | grep I350 | wc -l`
     IDT=`lspci | grep IDT | wc -l`
     VGA=`lspci | grep VGA | wc -l`
-    str="pcisum=$pci_num chelsio=$chelsio_num IDT=$IDR 82574=$ETH_82574 I350=$I350 VGA=$VGA"
+    Xilinx=`lspci | grep Xilinx | wc -l`
+    str="pcisum=$pci_num chelsio=$chelsio_num IDT=$IDR 82574=$ETH_82574 I350=$I350 VGA=$VGA Xilinx=$Xilinx"
     DATE=`date "+%Y%m%d-%H%M"`
     echo $DATE $str >> $LOG_FILE
 }
