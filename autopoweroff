@@ -418,7 +418,7 @@ function_log_down() {
     IDT=`lspci | grep IDT | wc -l`
     VGA=`lspci | grep VGA | wc -l`
     Xilinx=`lspci | grep Xilinx | wc -l`
-    str="pcisum=$pci_num chelsio=$chelsio_num IDT=$IDR 82574=$ETH_82574 I350=$I350 VGA=$VGA Xilinx=$Xilinx"
+    str="pcisum=$pci_num chelsio=$chelsio_num IDT=$IDT 82574=$ETH_82574 I350=$I350 VGA=$VGA Xilinx=$Xilinx"
     DATE=`date "+%Y%m%d-%H%M"`
     echo $DATE $str >> $LOG_FILE
 }
