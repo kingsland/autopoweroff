@@ -1,0 +1,10 @@
+Just tested on gdm3 lightdm desktop env like
+ubuntu 18 ubuntu 20 redhat7.5 Kylin-4.0.2 Kylin-V10 NeoKylin
+
+This scripts need zenity!!
+
+Run this scripts will remove login interface, sudo password.
+Although, these settings will restore when you stop running.
+I shell still warnning you about that.
+If you don't mind, just run it by command ./autopoweroff
+with or without sudo. Also you can just click it.
